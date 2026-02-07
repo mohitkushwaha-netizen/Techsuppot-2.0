@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Tech Support Hacker Dashboard</title>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.9.3/html2pdf.bundle.min.js"></script>
+
+<style>
+:root{
+ --bg:#0b0f14;
+ --card:#0f172a;
+ --text:#c9d1d9;
+ --primary:#00ff9c;
+ --border:#1e293b;
+}
+body{
+ margin:0;
+ font-family:Segoe UI,Roboto Mono,sans-serif;
+ background:var(--bg);
+ color:var(--text);
+}
+.header{
+ padding:18px;
+ color:#a2f9d8;
+ font-size:22px;
+ border-bottom:1px solid var(--border);
+ display:flex;
+ justify-content:space-between;
+}
+.container{padding:20px}
+.card{
+ background:var(--card);
+ border-radius:14px;
+ padding:20px;
+ margin-bottom:20px;
+ box-shadow:0 0 20px rgba(0,255,156,.08);
+}
+.controls input,.controls select,.controls button{
+ background:#020617;
+ color:var(--text);
+ border:1px solid var(--border);
+ padding:10px;
+ margin:5px;
+ border-radius:6px;
+}
+.controls button{
+ background:var(--primary);
+ color:#000;
+ font-weight:600;
+ cursor:pointer;
+}
+.kpis{
+ display:grid;
+ grid-template-columns:repeat(4,1fr);
+ gap:15px;
+}
+.kpi{
+ border:1px solid var(--border);
+ border-radius:12px;
+ padding:15px;
+ text-align:center;
+}
+.kpi h2{color:var(--primary)}
+table{
+ width:100%;
+ border-collapse:collapse;
+}
+th,td{
+ padding:10px;
+ text-align:center;
+ border-bottom:1px solid var(--border);
+}
+th{color:#38bdf8}
+.green{color:#00ff9c}
+.yellow{color:#facc15}
+.red{color:#f87171}
+.chart-box{height:320px}
+.loader{
+ position:fixed;
+ inset:0;
+ background:rgba(0,0,0,.85);
+ display:none;
+ align-items:center;
+ justify-content:center;
+ z-index:999;
+}
+.loader div{
+ color:var(--primary);
+ font-size:20px;
+ animation:pulse 1.2s infinite;
+}
+@keyframes pulse{
+ 0%{opacity:.3}50%{opacity:1}100%{opacity:.3}
+}
+</style>
+</head>
+
+<body id="dashboard">
+
+<div class="loader" id="loader"><div>Loading data…</div></div>
+
+<div class="header">
+⚡ Tech Support Performance Dashboard
+<button onclick="exportPDF()">📄 Export PDF</button>
+</div>
+
+<div class="container">
+
+<div class="card controls">
+<input type="file" id="upload">
+<input type="text" id="sheetUrl" placeholder="Google Sheet link" style="width:30%">
+<button onclick="loadGoogleSheet()">Load Sheet</button><br>
+
+<select id="agentFilter" multiple size="5" onchange="applyFilter()"></select>
+<div style="font-size:12px;color:#64748b">
+Ctrl (Windows) / Cmd (Mac) to select multiple agents
+</div>
+</div>
+
+<div class="kpis">
+<div class="kpi"><div>Total</div><h2 id="kTotal">0</h2></div>
+<div class="kpi"><div>Closed</div><h2 id="kClosed">0</h2></div>
+<div class="kpi"><div>Avg Time</div><h2 id="kAvg">-</h2></div>
+<div class="kpi"><div>90th %ile</div><h2 id="kP90">-</h2></div>
+</div>
+
+<div class="card">
+<table>
+<thead>
+<tr>
+<th>Agent</th><th>Closed</th><th>Esc</th><th>Working</th>
+<th>Total</th><th>Avg</th><th>P90</th>
+</tr>
+</thead>
+<tbody id="tableBody"></tbody>
+</table>
+</div>
+
+<div class="card">
+<div class="chart-box"><canvas id="barChart"></canvas></div>
+</div>
+
+<div class="card">
+<div class="chart-box"><canvas id="pieChart"></canvas></div>
+</div>
+
+</div>
+
+<script>
+let rawData=[], barChart, pieChart;
+const colorPool=["#00ff9c","#38bdf8","#f87171","#a78bfa","#facc15","#4ade80","#fb7185"];
+
+function showLoader(v){document.getElementById("loader").style.display=v?"flex":"none";}
+function excelDate(v){if(typeof v==="number")return new Date((v-25569)*86400*1000);let d=new Date(v);return isNaN(d)?null:d;}
+function formatTime(h){if(!h||isNaN(h))return"-";let m=Math.round(h*60);return Math.floor(m/60)+"h "+(m%60)+"m";}
+function slaClass(h){if(h<=24)return"green";if(h<=48)return"yellow";return"red";}
+
+function getColorMap(labels){
+ let map={};
+ labels.forEach((l,i)=>map[l]=colorPool[i%colorPool.length]);
+ return map;
+}
+
+function processData(rows){
+ rawData=rows;
+ let agents=[...new Set(rows.map(r=>r["Case Owner"]||"Unassigned"))];
+ let sel=document.getElementById("agentFilter");
+ sel.innerHTML="";
+ agents.forEach(a=>sel.innerHTML+=`<option value="${a}">${a}</option>`);
+ applyFilter();
+}
+
+function applyFilter(){
+ let sel=[...document.getElementById("agentFilter").selectedOptions].map(o=>o.value);
+ let rows=sel.length?rawData.filter(r=>sel.includes(r["Case Owner"]||"Unassigned")):rawData;
+
+ let map={},allTimes=[],closed=0,esc=0,work=0;
+ rows.forEach(r=>{
+  let o=r["Case Owner"]||"Unassigned";
+  let s=(r["Status"]||"").toLowerCase();
+  map[o]??={c:0,e:0,w:0,t:0,times:[]};
+  map[o].t++;
+  if(s.includes("close")){
+   map[o].c++;closed++;
+   let a=excelDate(r["Date/Time Opened"]),b=excelDate(r["Date/Time Closed"]);
+   if(a&&b){let h=(b-a)/36e5;map[o].times.push(h);allTimes.push(h);}
+  }else if(s.includes("escal")){map[o].e++;esc++;}
+  else{map[o].w++;work++;}
+ });
+
+ document.getElementById("kTotal").innerText=rows.length;
+ document.getElementById("kClosed").innerText=closed;
+ document.getElementById("kAvg").innerText=formatTime(allTimes.reduce((a,b)=>a+b,0)/allTimes.length);
+ document.getElementById("kP90").innerText=formatTime(allTimes.sort((a,b)=>a-b)[Math.ceil(allTimes.length*.9)-1]);
+
+ let tb=document.getElementById("tableBody");tb.innerHTML="";
+ let labels=[],values=[];
+ Object.entries(map).forEach(([k,v])=>{
+  let avg=v.times.reduce((a,b)=>a+b,0)/v.times.length;
+  let p90=v.times.sort((a,b)=>a-b)[Math.ceil(v.times.length*.9)-1];
+  labels.push(k);values.push(v.c);
+  tb.innerHTML+=`<tr>
+   <td>${k}</td><td>${v.c}</td><td>${v.e}</td><td>${v.w}</td>
+   <td>${v.t}</td>
+   <td class="${slaClass(avg)}">${formatTime(avg)}</td>
+   <td class="${slaClass(p90)}">${formatTime(p90)}</td>
+  </tr>`;
+ });
+
+ let colors=getColorMap(labels);
+ renderBar(labels,values,colors);
+ renderPie(labels,values,colors);
+}
+
+function renderBar(l,d,c){
+ if(barChart)barChart.destroy();
+ barChart=new Chart(barChartEl,{
+  type:"bar",
+  data:{labels:l,datasets:[{data:d,backgroundColor:l.map(x=>c[x])}]},
+  options:{plugins:{legend:{display:false}}}
+ });
+}
+function renderPie(l,d,c){
+ if(pieChart)pieChart.destroy();
+ pieChart=new Chart(pieChartEl,{
+  type:"pie",
+  data:{labels:l,datasets:[{data:d,backgroundColor:l.map(x=>c[x])}]}
+ });
+}
+
+const barChartEl=document.getElementById("barChart");
+const pieChartEl=document.getElementById("pieChart");
+
+document.getElementById("upload").onchange=e=>{
+ showLoader(true);
+ let r=new FileReader();
+ r.onload=ev=>{
+  let wb=XLSX.read(ev.target.result,{type:"binary"});
+  processData(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]));
+  showLoader(false);
+ };
+ r.readAsBinaryString(e.target.files[0]);
+};
+
+function loadGoogleSheet(){
+ let u=document.getElementById("sheetUrl").value;
+ if(!u)return alert("Enter sheet link");
+ showLoader(true);
+ fetch(u.replace("/edit","/export?format=csv"))
+ .then(r=>r.text())
+ .then(t=>{
+  let wb=XLSX.read(t,{type:"string"});
+  processData(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]));
+  showLoader(false);
+ });
+}
+
+function exportPDF(){
+ html2pdf().from(document.getElementById("dashboard")).save("Tech-Dashboard.pdf");
+}
+</script>
+</body>
+</html>
